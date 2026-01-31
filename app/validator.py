@@ -2,15 +2,16 @@
 
 import tempfile
 import os
-import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from dataclasses import dataclass, field
 from arelle.api.Session import Session
 from arelle.RuntimeOptions import RuntimeOptions
+from arelle.logging.handlers.StructuredMessageLogHandler import StructuredMessageLogHandler
 
 
 # Cache directory with pre-populated taxonomy files
-# Structure: cache/amsf.mc/fr/taxonomy/strix/2025/strix.xsd
+# Structure mirrors URL path: cache/http/amsf.mc/fr/taxonomy/strix/2025/strix.xsd
 CACHE_DIR = Path(__file__).parent.parent / "cache"
 
 
@@ -53,123 +54,103 @@ class ValidationResult:
 def validate_xbrl(xml_content: str) -> ValidationResult:
     """Validate XBRL content against the bundled taxonomy."""
 
-    # Create temp files for input and log output
+    # Write XML to temp file (Arelle requires file paths)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".xml", delete=False, encoding="utf-8"
     ) as xml_file:
         xml_file.write(xml_content)
         xml_path = xml_file.name
 
-    log_path = tempfile.mktemp(suffix=".log")
-
     try:
-        _run_arelle_validation(xml_path, log_path)
-        messages = _parse_log_file(log_path)
+        messages = _run_arelle_validation(xml_path)
         has_errors = any(m.severity == "error" for m in messages)
         return ValidationResult(valid=not has_errors, messages=messages)
     finally:
         os.unlink(xml_path)
-        if os.path.exists(log_path):
-            os.unlink(log_path)
 
 
-def _run_arelle_validation(file_path: str, log_path: str) -> None:
-    """Run Arelle validation, writing logs to file."""
+def _run_arelle_validation(file_path: str) -> list[ValidationMessage]:
+    """Run Arelle validation and capture messages."""
 
     options = RuntimeOptions(
         entrypointFile=file_path,
         validate=True,
-        logFile=log_path,
-        logLevel="DEBUG",
         cacheDirectory=str(CACHE_DIR),
-        internetConnectivity="offline",  # Use only local cache
+        internetConnectivity="offline",
     )
 
+    log_handler = StructuredMessageLogHandler()
+
     with Session() as session:
-        session.run(options)
+        session.run(options, logHandler=log_handler)
+        log_xml = session.get_logs("xml")
+
+    return _parse_log_xml(log_xml)
 
 
-def _parse_log_file(log_path: str) -> list[ValidationMessage]:
-    """Parse Arelle log file into ValidationMessages."""
+def _parse_log_xml(log_xml: str) -> list[ValidationMessage]:
+    """Parse Arelle XML log output into ValidationMessages."""
     messages = []
 
-    if not os.path.exists(log_path):
+    if not log_xml or not log_xml.strip():
         return messages
 
-    with open(log_path, "r", encoding="utf-8") as f:
-        log_content = f.read()
+    try:
+        root = ET.fromstring(log_xml)
 
-    for line in log_content.strip().split("\n"):
-        if not line.strip():
-            continue
+        for entry in root.findall("entry"):
+            code = entry.get("code", "unknown")
+            level = entry.get("level", "info").lower()
+            severity = _normalize_severity(level)
 
-        # Pattern: [messageCode] message - file, line X, column Y
-        match = re.match(r"\[([^\]]+)\]\s*(.+)", line)
-        if match:
-            code = match.group(1)
-            message_text = match.group(2)
-
-            # Determine severity from code
-            severity = _severity_from_code(code)
-
-            # Try to extract line/column from message
-            line_num = None
-            column_num = None
-
-            line_match = re.search(r"line\s+(\d+)", message_text)
-            if line_match:
-                line_num = int(line_match.group(1))
-
-            col_match = re.search(r"column\s+(\d+)", message_text)
-            if col_match:
-                column_num = int(col_match.group(1))
+            # Get message text from nested message element
+            message_elem = entry.find("message")
+            if message_elem is not None:
+                message_text = message_elem.text or ""
+                line = _safe_int(message_elem.get("line"))
+                column = _safe_int(message_elem.get("column"))
+            else:
+                message_text = entry.text or ""
+                line = None
+                column = None
 
             messages.append(
                 ValidationMessage(
                     severity=severity,
                     code=code,
                     message=message_text.strip(),
-                    line=line_num,
-                    column=column_num,
+                    line=line,
+                    column=column,
                 )
             )
+    except ET.ParseError:
+        # If XML parsing fails, return raw content as error
+        messages.append(
+            ValidationMessage(
+                severity="error",
+                code="arelle:logParseError",
+                message=f"Failed to parse Arelle log output: {log_xml[:200]}",
+            )
+        )
 
     return messages
 
 
-def _severity_from_code(code: str) -> str:
-    """Determine severity from Arelle message code."""
-    code_lower = code.lower()
+def _safe_int(value: str | None) -> int | None:
+    """Safely convert string to int, returning None on failure."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
 
-    # Known error patterns
-    if any(
-        x in code_lower
-        for x in [
-            "error",
-            "err",
-            "invalid",
-            "missing",
-            "syntax",
-            "undefined",
-            "violation",
-        ]
-    ):
+
+def _normalize_severity(level: str) -> str:
+    """Normalize log level to severity."""
+    level = level.lower()
+    if level in ("error", "err", "fatal", "critical"):
         return "error"
-
-    # Known warning patterns
-    if any(x in code_lower for x in ["warning", "warn", "deprecated"]):
+    if level in ("warning", "warn"):
         return "warning"
-
-    # Info is default
-    if code_lower == "info":
-        return "info"
-
-    # XBRL spec codes starting with xbrl are usually errors
-    if code_lower.startswith("xbrl"):
-        return "error"
-
-    # XML schema errors
-    if code_lower.startswith("xmlschema"):
-        return "error"
-
     return "info"

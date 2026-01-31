@@ -14,6 +14,9 @@ from arelle.logging.handlers.StructuredMessageLogHandler import StructuredMessag
 # Structure mirrors URL path: cache/http/amsf.mc/fr/taxonomy/strix/2025/strix.xsd
 CACHE_DIR = Path(__file__).parent.parent / "cache"
 
+# Compiled XULE ruleset for cross-field validation
+XULE_RULESET = CACHE_DIR / "strix_2025_rules.zip"
+
 
 @dataclass
 class ValidationMessage:
@@ -70,13 +73,21 @@ def validate_xbrl(xml_content: str) -> ValidationResult:
 
 
 def _run_arelle_validation(file_path: str) -> list[ValidationMessage]:
-    """Run Arelle validation and capture messages."""
+    """Run Arelle validation with XULE rules and capture messages."""
+
+    # Build plugin options for XULE validation
+    plugin_options = {}
+    if XULE_RULESET.exists():
+        plugin_options["xuleRuleSet"] = str(XULE_RULESET)
+        plugin_options["xuleRun"] = True  # Enable XULE rule execution
 
     options = RuntimeOptions(
         entrypointFile=file_path,
         validate=True,
         cacheDirectory=str(CACHE_DIR),
         internetConnectivity="offline",
+        plugins="xule" if XULE_RULESET.exists() else None,
+        pluginOptions=plugin_options if plugin_options else None,
     )
 
     log_handler = StructuredMessageLogHandler()
@@ -101,7 +112,6 @@ def _parse_log_xml(log_xml: str) -> list[ValidationMessage]:
         for entry in root.findall("entry"):
             code = entry.get("code", "unknown")
             level = entry.get("level", "info").lower()
-            severity = _normalize_severity(level)
 
             # Get message text from nested message element
             message_elem = entry.find("message")
@@ -113,6 +123,9 @@ def _parse_log_xml(log_xml: str) -> list[ValidationMessage]:
                 message_text = entry.text or ""
                 line = None
                 column = None
+
+            # Normalize severity (XULE outputs "Invalid!" messages as info)
+            severity = _normalize_severity(level, message_text)
 
             messages.append(
                 ValidationMessage(
@@ -146,11 +159,18 @@ def _safe_int(value: str | None) -> int | None:
         return None
 
 
-def _normalize_severity(level: str) -> str:
-    """Normalize log level to severity."""
+def _normalize_severity(level: str, message: str = "") -> str:
+    """Normalize log level to severity.
+
+    XULE rules output "Invalid!" messages as info-level logs,
+    so we promote them to errors based on message content.
+    """
     level = level.lower()
     if level in ("error", "err", "fatal", "critical"):
         return "error"
     if level in ("warning", "warn"):
         return "warning"
+    # XULE rules output validation failures as info with "Invalid!" in message
+    if "Invalid!" in message:
+        return "error"
     return "info"

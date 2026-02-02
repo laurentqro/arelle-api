@@ -3,11 +3,50 @@
 import tempfile
 import os
 import xml.etree.ElementTree as ET
+from logging import LogRecord
 from pathlib import Path
 from dataclasses import dataclass, field
 from arelle.api.Session import Session
 from arelle.RuntimeOptions import RuntimeOptions
 from arelle.logging.handlers.StructuredMessageLogHandler import StructuredMessageLogHandler
+
+
+class SafeStructuredMessageLogHandler(StructuredMessageLogHandler):
+    """Log handler that handles KeyError in message formatting.
+
+    Arelle's StructuredMessageLogHandler.get_message() catches TypeError and ValueError
+    but not KeyError, which occurs when format strings reference missing keys.
+    This subclass overrides emit() to use our safer get_message().
+    """
+
+    def emit(self, logRecord: LogRecord) -> None:
+        """Override emit to use our safer get_message method."""
+        from collections.abc import Mapping
+        from typing import cast, Any
+
+        self.logRecordBuffer.append(logRecord)
+        if not logRecord.args or len(logRecord.args) == 0:
+            logRecord.args = {}
+
+        args = cast(Mapping[str, Any], logRecord.args)
+        data = {
+            "levelname": logRecord.levelname,
+            "messageCode": getattr(logRecord, "messageCode", ""),
+            "msg": self._safe_get_message(logRecord),
+            "refs": getattr(logRecord, "refs", []),
+            "args": args.get('args', {})
+        }
+
+        self.messages.append(data)
+
+    @staticmethod
+    def _safe_get_message(log_record: LogRecord) -> str | tuple[object, ...] | dict[str, object] | None:
+        """Get message with additional KeyError handling."""
+        try:
+            return log_record.msg % log_record.args
+        except (TypeError, ValueError, KeyError):
+            # Return raw message if formatting fails
+            return log_record.msg
 
 
 # Cache directory with pre-populated taxonomy files
@@ -90,7 +129,7 @@ def _run_arelle_validation(file_path: str) -> list[ValidationMessage]:
         pluginOptions=plugin_options if plugin_options else None,
     )
 
-    log_handler = StructuredMessageLogHandler()
+    log_handler = SafeStructuredMessageLogHandler()
 
     with Session() as session:
         session.run(options, logHandler=log_handler)

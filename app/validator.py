@@ -163,6 +163,10 @@ def _parse_log_xml(log_xml: str) -> list[ValidationMessage]:
                 line = None
                 column = None
 
+            # Strip before severity check so trailing whitespace doesn't
+            # defeat pattern matching in _is_spurious_dimension_message.
+            message_text = message_text.strip()
+
             # Normalize severity (XULE outputs "Invalid!" messages as info)
             severity = _normalize_severity(level, message_text)
 
@@ -170,7 +174,7 @@ def _parse_log_xml(log_xml: str) -> list[ValidationMessage]:
                 ValidationMessage(
                     severity=severity,
                     code=code,
-                    message=message_text.strip(),
+                    message=message_text,
                     line=line,
                     column=column,
                 )
@@ -198,11 +202,30 @@ def _safe_int(value: str | None) -> int | None:
         return None
 
 
+def _is_spurious_dimension_message(message: str) -> bool:
+    """Detect false-positive XULE dimension rule messages.
+
+    The XULE {covered ...} pattern in message blocks evaluates in a different
+    scope than the assertion. For parent-child dimension rules, this causes
+    the message block to fire with $a2 = none (no country dimension),
+    producing "Invalid! Country in child (X) not in parent (Y): " with an
+    empty country string — even when all actual child facts pass validation.
+
+    These messages always end with ": " (colon + space or just colon) because
+    $a2.string is empty. Real failures include the actual country code.
+    """
+    return (
+        message.startswith("Invalid! Country in child")
+        and message.endswith(":")
+    )
+
+
 def _normalize_severity(level: str, message: str = "") -> str:
     """Normalize log level to severity.
 
     XULE rules output "Invalid!" messages as info-level logs,
     so we promote them to errors based on message content.
+    Spurious dimension rule messages are kept as info.
     """
     level = level.lower()
     if level in ("error", "err", "fatal", "critical"):
@@ -211,5 +234,8 @@ def _normalize_severity(level: str, message: str = "") -> str:
         return "warning"
     # XULE rules output validation failures as info with "Invalid!" in message
     if "Invalid!" in message:
+        # Filter out false positives from dimension rules (empty country string)
+        if _is_spurious_dimension_message(message):
+            return "info"
         return "error"
     return "info"

@@ -12,6 +12,10 @@ RUN uv sync --frozen --no-dev
 # Copy application code
 COPY app/ ./app/
 COPY taxonomy/ ./taxonomy/
+COPY cache/ ./cache/
+
+# Install XULE plugin into Arelle's plugin directory
+COPY xule_plugin/ ./.venv/lib/python3.12/site-packages/arelle/plugin/xule/
 
 # Expose port
 EXPOSE 8000

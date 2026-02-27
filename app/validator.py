@@ -117,8 +117,8 @@ def _run_arelle_validation(file_path: str) -> list[ValidationMessage]:
     # Build plugin options for XULE validation
     plugin_options = {}
     if XULE_RULESET.exists():
-        plugin_options["xuleRuleSet"] = str(XULE_RULESET)
-        plugin_options["xuleRun"] = True  # Enable XULE rule execution
+        plugin_options["xule_rule_set"] = str(XULE_RULESET)
+        plugin_options["xule_run"] = True  # Enable XULE rule execution
 
     options = RuntimeOptions(
         entrypointFile=file_path,

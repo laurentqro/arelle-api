@@ -13,6 +13,12 @@ app = FastAPI(
 )
 
 
+@app.get("/health")
+async def health():
+    """Liveness probe for deployment tooling."""
+    return {"status": "ok"}
+
+
 @app.post("/validate")
 async def validate(request: Request):
     """Validate an XBRL instance document.

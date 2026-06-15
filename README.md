@@ -8,14 +8,30 @@ A Python HTTP API that validates XBRL instance documents against the AMSF/Strix 
 # Install dependencies
 uv sync
 
-# Start the server
-uv run uvicorn app.main:app --port 8000
+# Start the server (ARELLE_API_TOKEN must be set; see Authentication below)
+ARELLE_API_TOKEN=your-shared-token uv run uvicorn app.main:app --port 8000
 
 # Validate an XBRL file
 curl -X POST http://localhost:8000/validate \
+  -H "Authorization: Bearer your-shared-token" \
   -H "Content-Type: application/xml" \
   --data-binary @your_file.xml
 ```
+
+## Authentication
+
+`POST /validate` requires a shared bearer token. The service runs on the
+production network and validates client XBRL instances, so the validation
+endpoint is not open.
+
+- Send the token as `Authorization: Bearer <token>`.
+- The expected token is read from the **`ARELLE_API_TOKEN`** environment
+  variable. Wire this as the Kamal secret on deployment.
+- **Fail-closed:** if `ARELLE_API_TOKEN` is unset or blank, `/validate` refuses
+  every request (401) rather than running open. A missing or incorrect token
+  also returns `401`.
+- `GET /health` is intentionally **unauthenticated** so deployment/orchestration
+  liveness probes keep working without the secret.
 
 ## API
 
@@ -24,6 +40,7 @@ curl -X POST http://localhost:8000/validate \
 Validates an XBRL instance document against the bundled taxonomy.
 
 **Request:**
+- `Authorization: Bearer <token>` (required, see Authentication)
 - Content-Type: `application/xml`
 - Body: Raw XML content of the XBRL instance
 
@@ -228,19 +245,25 @@ Possible causes:
 
 ### Arelle Thread Safety
 
-Arelle uses global state and is **not thread-safe**. The API runs with a single worker to avoid concurrency issues. For high-throughput scenarios, run multiple API instances behind a load balancer.
+Arelle uses global state and is **not thread-safe**. The API therefore runs a
+**single Uvicorn worker on purpose** (`--workers 1` in the `Dockerfile` CMD).
+This is an accepted constraint for v1: concurrency is handled by running
+multiple single-worker API instances behind a load balancer, not by adding
+workers to one process.
 
 ## Integration Example (Rails)
 
 ```ruby
 class XbrlValidator
   API_URL = ENV.fetch("ARELLE_API_URL", "http://localhost:8000")
+  API_TOKEN = ENV.fetch("ARELLE_API_TOKEN")
 
   def self.validate(xml_string)
     response = Net::HTTP.post(
       URI("#{API_URL}/validate"),
       xml_string,
-      "Content-Type" => "application/xml"
+      "Content-Type" => "application/xml",
+      "Authorization" => "Bearer #{API_TOKEN}"
     )
 
     JSON.parse(response.body)

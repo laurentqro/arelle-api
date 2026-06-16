@@ -2,6 +2,7 @@
 
 import tempfile
 import os
+import re
 import xml.etree.ElementTree as ET
 from logging import LogRecord
 from pathlib import Path
@@ -49,12 +50,34 @@ class SafeStructuredMessageLogHandler(StructuredMessageLogHandler):
             return log_record.msg
 
 
-# Cache directory with pre-populated taxonomy files
-# Structure mirrors URL path: cache/http/amsf.mc/fr/taxonomy/strix/2025/strix.xsd
+# Cache directory with pre-populated taxonomy files. The taxonomy is addressed
+# by campaign year: cache/http/amsf.mc/fr/taxonomy/strix/<campaign_year>/strix.xsd
+# Arelle resolves the right year's DTS automatically from the instance's
+# schemaRef href, since the offline cache mirrors that URL.
 CACHE_DIR = Path(__file__).parent.parent / "cache"
 
-# Compiled XULE ruleset for cross-field validation
-XULE_RULESET = CACHE_DIR / "strix_2025_rules.zip"
+# The compiled XULE ruleset is per campaign year (the rules change between
+# campaigns), so it is selected from the campaign year in the instance's
+# schemaRef rather than hard-coded. Cache holds strix_<campaign_year>_rules.zip.
+_SCHEMA_REF_CAMPAIGN_YEAR = re.compile(r"/strix/(\d{4})/strix\.xsd")
+
+
+def _campaign_year_from_instance(xml_content: str) -> str | None:
+    """Extract the campaign year from the instance's strix schemaRef href.
+
+    The href is .../strix/<campaign_year>/strix.xsd, so the directory segment
+    is the campaign-year key. Returns None if no strix schemaRef is present.
+    """
+    match = _SCHEMA_REF_CAMPAIGN_YEAR.search(xml_content)
+    return match.group(1) if match else None
+
+
+def _ruleset_for_campaign_year(campaign_year: str | None) -> Path | None:
+    """Return the compiled XULE ruleset for a campaign year, if one is bundled."""
+    if campaign_year is None:
+        return None
+    ruleset = CACHE_DIR / f"strix_{campaign_year}_rules.zip"
+    return ruleset if ruleset.exists() else None
 
 
 @dataclass
@@ -96,6 +119,11 @@ class ValidationResult:
 def validate_xbrl(xml_content: str) -> ValidationResult:
     """Validate XBRL content against the bundled taxonomy."""
 
+    # Select the XULE ruleset for the instance's campaign year. The DTS itself
+    # is resolved by Arelle from the schemaRef href against the offline cache.
+    campaign_year = _campaign_year_from_instance(xml_content)
+    ruleset = _ruleset_for_campaign_year(campaign_year)
+
     # Write XML to temp file (Arelle requires file paths)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".xml", delete=False, encoding="utf-8"
@@ -104,20 +132,23 @@ def validate_xbrl(xml_content: str) -> ValidationResult:
         xml_path = xml_file.name
 
     try:
-        messages = _run_arelle_validation(xml_path)
+        messages = _run_arelle_validation(xml_path, ruleset)
         has_errors = any(m.severity == "error" for m in messages)
         return ValidationResult(valid=not has_errors, messages=messages)
     finally:
         os.unlink(xml_path)
 
 
-def _run_arelle_validation(file_path: str) -> list[ValidationMessage]:
-    """Run Arelle validation with XULE rules and capture messages."""
+def _run_arelle_validation(
+    file_path: str, ruleset: Path | None
+) -> list[ValidationMessage]:
+    """Run Arelle validation with the campaign-year XULE ruleset and capture
+    messages. Without a ruleset, runs schema/dimension validation only."""
 
     # Build plugin options for XULE validation
     plugin_options = {}
-    if XULE_RULESET.exists():
-        plugin_options["xule_rule_set"] = str(XULE_RULESET)
+    if ruleset is not None:
+        plugin_options["xule_rule_set"] = str(ruleset)
         plugin_options["xule_run"] = True  # Enable XULE rule execution
 
     options = RuntimeOptions(
@@ -125,7 +156,7 @@ def _run_arelle_validation(file_path: str) -> list[ValidationMessage]:
         validate=True,
         cacheDirectory=str(CACHE_DIR),
         internetConnectivity="offline",
-        plugins="xule" if XULE_RULESET.exists() else None,
+        plugins="xule" if ruleset is not None else None,
         pluginOptions=plugin_options if plugin_options else None,
     )
 
